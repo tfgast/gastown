@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // Common errors
@@ -224,6 +225,10 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	if err := m.git.Clone(opts.GitURL, refineryRigPath); err != nil {
 		return nil, fmt.Errorf("cloning for refinery: %w", err)
 	}
+	// Create refinery CLAUDE.md (overrides any from cloned repo)
+	if err := m.createRoleCLAUDEmd(refineryRigPath, "refinery", opts.Name, ""); err != nil {
+		return nil, fmt.Errorf("creating refinery CLAUDE.md: %w", err)
+	}
 
 	// Clone repository for mayor
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
@@ -233,6 +238,10 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	if err := m.git.Clone(opts.GitURL, mayorRigPath); err != nil {
 		return nil, fmt.Errorf("cloning for mayor: %w", err)
 	}
+	// Create mayor CLAUDE.md (overrides any from cloned repo)
+	if err := m.createRoleCLAUDEmd(mayorRigPath, "mayor", opts.Name, ""); err != nil {
+		return nil, fmt.Errorf("creating mayor CLAUDE.md: %w", err)
+	}
 
 	// Clone repository for default crew workspace
 	crewPath := filepath.Join(rigPath, "crew", opts.CrewName)
@@ -241,6 +250,10 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	}
 	if err := m.git.Clone(opts.GitURL, crewPath); err != nil {
 		return nil, fmt.Errorf("cloning for crew: %w", err)
+	}
+	// Create crew CLAUDE.md (overrides any from cloned repo)
+	if err := m.createRoleCLAUDEmd(crewPath, "crew", opts.Name, opts.CrewName); err != nil {
+		return nil, fmt.Errorf("creating crew CLAUDE.md: %w", err)
 	}
 
 	// Create witness directory (no clone needed)
@@ -383,4 +396,30 @@ func (m *Manager) ListRigNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// createRoleCLAUDEmd creates a CLAUDE.md file with role-specific context.
+// This ensures each workspace (crew, refinery, mayor) gets the correct prompting,
+// overriding any CLAUDE.md that may exist in the cloned repository.
+func (m *Manager) createRoleCLAUDEmd(workspacePath string, role string, rigName string, workerName string) error {
+	tmpl, err := templates.New()
+	if err != nil {
+		return err
+	}
+
+	data := templates.RoleData{
+		Role:     role,
+		RigName:  rigName,
+		TownRoot: m.townRoot,
+		WorkDir:  workspacePath,
+		Polecat:  workerName, // Used for crew member name as well
+	}
+
+	content, err := tmpl.RenderRole(role, data)
+	if err != nil {
+		return err
+	}
+
+	claudePath := filepath.Join(workspacePath, "CLAUDE.md")
+	return os.WriteFile(claudePath, []byte(content), 0644)
 }
