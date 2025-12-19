@@ -240,23 +240,19 @@ func (b *Beads) Ready() ([]*Issue, error) {
 }
 
 // ReadyWithType returns ready issues filtered by type.
-// This fetches all ready issues and filters client-side by type.
-// Issues are returned sorted by priority (lowest first) then by creation time (oldest first).
+// Uses bd ready --type flag for server-side filtering (gt-ktf3).
 func (b *Beads) ReadyWithType(issueType string) ([]*Issue, error) {
-	issues, err := b.Ready()
+	out, err := b.run("ready", "--json", "--type", issueType, "-n", "100")
 	if err != nil {
 		return nil, err
 	}
 
-	// Filter by type
-	var filtered []*Issue
-	for _, issue := range issues {
-		if issue.Type == issueType {
-			filtered = append(filtered, issue)
-		}
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready output: %w", err)
 	}
 
-	return filtered, nil
+	return issues, nil
 }
 
 // Show returns detailed information about an issue.
