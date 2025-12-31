@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -110,6 +111,9 @@ func runPrime(cmd *cobra.Command, args []string) error {
 
 	// Report agent state as running (ZFC: agents self-report state)
 	reportAgentState(ctx, "running")
+
+	// Emit session_start event for seance discovery
+	emitSessionEvent(ctx)
 
 	// Output context
 	if err := outputPrimeContext(ctx); err != nil {
@@ -1391,4 +1395,36 @@ func checkPendingEscalations(ctx RoleContext) {
 	fmt.Println("**Action required:** Review escalations with `bd list --tag=escalation`")
 	fmt.Println("Close resolved ones with `bd close <id> --reason \"resolution\"`")
 	fmt.Println()
+}
+
+// emitSessionEvent emits a session_start event for seance discovery.
+// The event is written to ~/gt/.events.jsonl and can be queried via gt seance.
+// Session ID comes from CLAUDE_SESSION_ID env var if available.
+func emitSessionEvent(ctx RoleContext) {
+	if ctx.Role == RoleUnknown {
+		return
+	}
+
+	// Get agent identity for the actor field
+	actor := getAgentIdentity(ctx)
+	if actor == "" {
+		return
+	}
+
+	// Get session ID from environment (set by Claude Code hooks)
+	sessionID := os.Getenv("CLAUDE_SESSION_ID")
+	if sessionID == "" {
+		// Fall back to a generated identifier
+		sessionID = fmt.Sprintf("%s-%d", actor, os.Getpid())
+	}
+
+	// Determine topic from hook state or default
+	topic := ""
+	if ctx.Role == RoleWitness || ctx.Role == RoleRefinery || ctx.Role == RoleDeacon {
+		topic = "patrol"
+	}
+
+	// Emit the event
+	payload := events.SessionPayload(sessionID, actor, topic, ctx.WorkDir)
+	events.LogFeed(events.TypeSessionStart, actor, payload)
 }

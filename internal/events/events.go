@@ -46,6 +46,10 @@ const (
 	TypeBoot    = "boot"
 	TypeHalt    = "halt"
 
+	// Session events (for seance discovery)
+	TypeSessionStart = "session_start"
+	TypeSessionEnd   = "session_end"
+
 	// Witness patrol events
 	TypePatrolStarted   = "patrol_started"
 	TypePolecatChecked  = "polecat_checked"
@@ -268,4 +272,23 @@ func HaltPayload(services []string) map[string]interface{} {
 	return map[string]interface{}{
 		"services": services,
 	}
+}
+
+// SessionPayload creates a payload for session start/end events.
+// sessionID: Claude Code session UUID
+// role: Gas Town role (e.g., "gastown/crew/joe", "deacon")
+// topic: What the session is working on
+// cwd: Working directory
+func SessionPayload(sessionID, role, topic, cwd string) map[string]interface{} {
+	p := map[string]interface{}{
+		"session_id": sessionID,
+		"role":       role,
+	}
+	if topic != "" {
+		p["topic"] = topic
+	}
+	if cwd != "" {
+		p["cwd"] = cwd
+	}
+	return p
 }
