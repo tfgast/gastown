@@ -16,7 +16,7 @@ Multi-agent orchestrator for Claude Code. Track work with convoys; sling to agen
 - **Go 1.23+** - [go.dev/dl](https://go.dev/dl/)
 - **Git 2.25+** - for worktree support
 - **beads (bd)** - [github.com/steveyegge/beads](https://github.com/steveyegge/beads) - required for issue tracking
-- **tmux 3.0+** - for full stack mode (optional for minimal mode)
+- **tmux 3.0+** - recommended for the full experience (the Mayor session is the primary interface)
 - **Claude Code CLI** - [claude.ai/code](https://claude.ai/code)
 
 ## Quick Start
@@ -31,24 +31,39 @@ gt install ~/gt
 # Add a project
 gt rig add myproject https://github.com/you/repo.git
 
-# Create a convoy and sling work (standard workflow)
+# Enter the Mayor's office (recommended)
+cd ~/gt && gt prime
+```
+
+Once inside the Mayor session, you're talking to Claude with full town context. Just tell it what you want:
+
+> "Help me fix the authentication bug in myproject"
+
+The Mayor will create convoys, dispatch workers, and coordinate everything. You can also run CLI commands directly:
+
+```bash
+# Create a convoy and sling work (CLI workflow)
 gt convoy create "Feature X" issue-123 issue-456 --notify --human
 gt sling issue-123 myproject
-gt sling issue-456 myproject
 
-# Track progress on dashboard
+# Track progress
 gt convoy list
+
+# Switch between agent sessions
+gt agents
 ```
 
 ## Core Concepts
 
+**The Mayor** is your AI coordinator. It's Claude Code with full context about your workspace, projects, and agents. The Mayor session (`gt prime`) is the primary way to interact with Gas Town - just tell it what you want to accomplish.
+
 ```
 Town (~/gt/)              Your workspace
+├── Mayor                 Your AI coordinator (start here)
 ├── Rig (project)         Container for a git project + its agents
 │   ├── Polecats          Workers (ephemeral, spawn → work → disappear)
 │   ├── Witness           Monitors workers, handles lifecycle
 │   └── Refinery          Merge queue processor
-└── Mayor                 Global coordinator
 ```
 
 **Hook**: Each agent has a hook where work hangs. On wake, run what's on your hook.
@@ -56,6 +71,26 @@ Town (~/gt/)              Your workspace
 **Beads**: Git-backed issue tracker. All work state lives here. [github.com/steveyegge/beads](https://github.com/steveyegge/beads)
 
 ## Workflows
+
+### Full Stack (Recommended)
+
+The primary Gas Town experience. Agents run in tmux sessions with the Mayor as your interface.
+
+```bash
+gt start                               # Start Gas Town (daemon + Mayor session)
+cd ~/gt && gt prime                    # Enter Mayor session
+
+# Inside Mayor session, just ask:
+# "Create a convoy for issues 123 and 456 in myproject"
+# "What's the status of my work?"
+# "Show me what the witness is doing"
+
+# Or use CLI commands:
+gt convoy create "Feature X" issue-123 issue-456
+gt sling issue-123 myproject           # Spawns polecat automatically
+gt convoy list                         # Dashboard view
+gt agents                              # Navigate between sessions
+```
 
 ### Minimal (No Tmux)
 
@@ -66,18 +101,6 @@ gt convoy create "Fix bugs" issue-123  # Create convoy (sling auto-creates if sk
 gt sling issue-123 myproject           # Assign to worker
 claude --resume                        # Agent reads mail, runs work
 gt convoy list                         # Check progress
-```
-
-### Full Stack (Tmux)
-
-Agents run in tmux sessions. Daemon manages lifecycle.
-
-```bash
-gt daemon start                        # Start lifecycle manager
-gt convoy create "Feature X" issue-123 issue-456
-gt sling issue-123 myproject           # Spawns polecat automatically
-gt sling issue-456 myproject           # Another worker
-gt convoy list                         # Dashboard view
 ```
 
 ### Pick Your Roles
