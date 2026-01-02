@@ -420,18 +420,7 @@ func (m *Manager) initBeads(rigPath, prefix string) error {
 	cmd.Dir = rigPath
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		lower := strings.ToLower(string(output))
-		if strings.Contains(lower, "no-agents") &&
-			(strings.Contains(lower, "unknown flag") ||
-				strings.Contains(lower, "unknown option") ||
-				strings.Contains(lower, "flag provided but not defined")) {
-			retry := exec.Command("bd", "init", "--prefix", prefix)
-			retry.Dir = rigPath
-			if retryErr := retry.Run(); retryErr == nil {
-				return nil
-			}
-		}
-		// bd might not be installed or --no-agents not supported, create minimal structure
+		// bd might not be installed or failed, create minimal structure
 		// Note: beads currently expects YAML format for config
 		configPath := filepath.Join(beadsDir, "config.yaml")
 		configContent := fmt.Sprintf("prefix: %s\n", prefix)
