@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -1047,6 +1048,17 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 
 	// Header
 	fmt.Printf("%s\n", style.Bold.Render(rigName))
+
+	// Operational state
+	opState, opSource := getRigOperationalState(townRoot, rigName)
+	if opState == "OPERATIONAL" {
+		fmt.Printf("  Status: %s\n", style.Success.Render(opState))
+	} else if opState == "PARKED" {
+		fmt.Printf("  Status: %s (%s)\n", style.Warning.Render(opState), opSource)
+	} else if opState == "DOCKED" {
+		fmt.Printf("  Status: %s (%s)\n", style.Dim.Render(opState), opSource)
+	}
+
 	fmt.Printf("  Path: %s\n", r.Path)
 	if r.Config != nil && r.Config.Prefix != "" {
 		fmt.Printf("  Beads prefix: %s-\n", r.Config.Prefix)
@@ -1471,4 +1483,49 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// getRigOperationalState returns the operational state and source for a rig.
+// It checks the wisp layer first (local/ephemeral), then rig bead labels (global).
+// Returns state ("OPERATIONAL", "PARKED", or "DOCKED") and source ("local", "global - synced", or "default").
+func getRigOperationalState(townRoot, rigName string) (state string, source string) {
+	// Check wisp layer first (local/ephemeral overrides)
+	wispConfig := wisp.NewConfig(townRoot, rigName)
+	if status := wispConfig.GetString("status"); status != "" {
+		switch strings.ToLower(status) {
+		case "parked":
+			return "PARKED", "local"
+		case "docked":
+			return "DOCKED", "local"
+		}
+	}
+
+	// Check rig bead labels (global/synced)
+	// Rig identity bead ID: <prefix>-rig-<name>
+	// Look for status:docked or status:parked labels
+	rigPath := filepath.Join(townRoot, rigName)
+	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
+	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
+
+	// Try to find the rig identity bead
+	// Convention: <prefix>-rig-<rigName>
+	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.Beads != nil {
+		rigBeadID := fmt.Sprintf("%s-rig-%s", rigCfg.Beads.Prefix, rigName)
+		if issue, err := bd.Show(rigBeadID); err == nil {
+			for _, label := range issue.Labels {
+				if strings.HasPrefix(label, "status:") {
+					statusValue := strings.TrimPrefix(label, "status:")
+					switch strings.ToLower(statusValue) {
+					case "docked":
+						return "DOCKED", "global - synced"
+					case "parked":
+						return "PARKED", "global - synced"
+					}
+				}
+			}
+		}
+	}
+
+	// Default: operational
+	return "OPERATIONAL", "default"
 }
