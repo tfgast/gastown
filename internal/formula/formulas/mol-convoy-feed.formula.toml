@@ -275,6 +275,10 @@ default = ""
 description = "Computed: number of issues dispatched"
 default = ""
 
+[vars.skipped_count]
+description = "Computed: number of issues skipped (unmapped prefix)"
+default = ""
+
 [vars.issue_id]
 description = "Computed: current issue ID in dispatch loop"
 default = ""
