@@ -155,7 +155,9 @@ func runSlingFormula(args []string) error {
 				targetPane = spawnInfo.Pane
 				formulaWorkDir = spawnInfo.ClonePath // Route bd commands to rig beads
 
-				wakeRigAgents(rigName)
+				if !slingNoBoot {
+					wakeRigAgents(rigName)
+				}
 			}
 		} else {
 			// Slinging to an existing agent

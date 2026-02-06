@@ -168,7 +168,9 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 		results = append(results, slingResult{beadID: beadID, polecat: spawnInfo.PolecatName, success: true})
 	}
 
-	wakeRigAgents(rigName)
+	if !slingNoBoot {
+		wakeRigAgents(rigName)
+	}
 
 	// Print summary
 	successCount := 0
