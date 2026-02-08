@@ -871,3 +871,41 @@ func TestExecuteMigrationStep_SkipsCompletedCommandsOnRetry(t *testing.T) {
 		t.Errorf("commands_completed = %d, want 3", sr.CommandsCompleted)
 	}
 }
+
+func TestExecuteMigrationStep_TimeoutKillsChildProcesses(t *testing.T) {
+	townRoot := t.TempDir()
+
+	origTimeout := runMigrationTimeout
+	runMigrationTimeout = 1 * time.Second
+	defer func() { runMigrationTimeout = origTimeout }()
+
+	markerFile := filepath.Join(townRoot, "child-was-here")
+
+	cp := &MigrationCheckpoint{
+		TownRoot:  townRoot,
+		StartedAt: time.Now(),
+		Steps:     make(map[string]StepRun),
+	}
+
+	// Spawn a background child that sleeps 3s then creates a marker file.
+	// The parent bash sleeps 30s and will be timed out after 1s.
+	// If process group kill works, the child dies too and no marker appears.
+	step := &formula.Step{
+		ID:    "orphan-test",
+		Title: "Step that spawns child processes",
+		Description: fmt.Sprintf(
+			"Run:\n\n```bash\n(sleep 3 && touch %s) &\nsleep 30\n```\n", markerFile),
+	}
+
+	err := executeMigrationStep(nil, cp, step, townRoot)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+
+	// Wait longer than the child's sleep to verify it was killed
+	time.Sleep(4 * time.Second)
+
+	if _, err := os.Stat(markerFile); err == nil {
+		t.Error("child process was NOT killed — orphaned process detected (marker file exists)")
+	}
+}
