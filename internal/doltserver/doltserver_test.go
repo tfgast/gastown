@@ -2489,7 +2489,10 @@ func TestMergePolecatBranch_ValidBranchName(t *testing.T) {
 
 func TestParseShowDatabases_JSON(t *testing.T) {
 	input := `{"rows":[{"Database":"hq"},{"Database":"gastown"},{"Database":"information_schema"}]}`
-	got := parseShowDatabases([]byte(input))
+	got, err := parseShowDatabases([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 databases, got %d: %v", len(got), got)
 	}
@@ -2511,7 +2514,10 @@ func TestParseShowDatabases_JSON(t *testing.T) {
 
 func TestParseShowDatabases_JSONEmpty(t *testing.T) {
 	input := `{"rows":[]}`
-	got := parseShowDatabases([]byte(input))
+	got, err := parseShowDatabases([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(got) != 0 {
 		t.Errorf("expected 0 databases, got %d: %v", len(got), got)
 	}
@@ -2520,7 +2526,10 @@ func TestParseShowDatabases_JSONEmpty(t *testing.T) {
 func TestParseShowDatabases_JSONEmptyDatabase(t *testing.T) {
 	// Rows with empty Database field should be filtered.
 	input := `{"rows":[{"Database":"hq"},{"Database":""}]}`
-	got := parseShowDatabases([]byte(input))
+	got, err := parseShowDatabases([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("expected 1 database, got %d: %v", len(got), got)
 	}
@@ -2529,8 +2538,38 @@ func TestParseShowDatabases_JSONEmptyDatabase(t *testing.T) {
 	}
 }
 
+func TestParseShowDatabases_UnexpectedJSONSchema(t *testing.T) {
+	// Valid JSON missing the expected "rows" key should return a parse error
+	// rather than silently returning zero databases (which would be
+	// misinterpreted as "all databases are missing" in the migration path).
+	input := `{"unexpected_key":[{"db":"hq"}]}`
+	_, err := parseShowDatabases([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for JSON missing 'rows' key, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing expected 'rows' key") {
+		t.Errorf("expected 'rows' key error, got: %v", err)
+	}
+}
+
+func TestParseShowDatabases_BrokenJSON(t *testing.T) {
+	// Corrupt JSON that starts with { should return an error.
+	input := `{"rows": invalid json}`
+	_, err := parseShowDatabases([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for broken JSON, got nil")
+	}
+	if !strings.Contains(err.Error(), "looks like JSON") {
+		t.Errorf("expected JSON guard error, got: %v", err)
+	}
+}
+
 func TestParseShowDatabases_LineFallback(t *testing.T) {
-	// Non-JSON output triggers line-based parsing.
+	// Non-JSON table-formatted output: all lines start with + or |,
+	// so the line parser filters them all out. Since the output is
+	// non-empty but yields zero databases, the parser returns an error
+	// to surface the format mismatch rather than silently reporting
+	// all databases as missing.
 	input := `+--------------------+
 | Database           |
 +--------------------+
@@ -2538,23 +2577,22 @@ func TestParseShowDatabases_LineFallback(t *testing.T) {
 | gastown            |
 | information_schema |
 +--------------------+`
-	got := parseShowDatabases([]byte(input))
-	// Lines starting with + or | are filtered, as is "Database" header
-	// and "information_schema". Only raw database names remain.
-	// The table-formatted lines all start with + or |, so only
-	// non-table lines would be parsed. This format should yield 0
-	// since all lines start with + or |.
-	// The fallback is for plain-text output like:
-	// hq\ngastown\ninformation_schema
-	if len(got) != 0 {
-		t.Errorf("table format should filter all lines, got %d: %v", len(got), got)
+	_, err := parseShowDatabases([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for table format yielding zero databases, got nil")
+	}
+	if !strings.Contains(err.Error(), "fallback parser returned zero databases") {
+		t.Errorf("expected fallback zero-result error, got: %v", err)
 	}
 }
 
 func TestParseShowDatabases_PlainText(t *testing.T) {
 	// Plain-text output (no JSON, no table formatting).
 	input := "hq\ngastown\ninformation_schema\n"
-	got := parseShowDatabases([]byte(input))
+	got, err := parseShowDatabases([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 databases, got %d: %v", len(got), got)
 	}

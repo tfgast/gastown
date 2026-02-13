@@ -273,7 +273,8 @@ func runDoltStart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Connection: %s\n", style.Dim.Render(doltserver.GetConnectionString(townRoot)))
 
 	// Verify all filesystem databases are actually served by the SQL server.
-	served, missing, verifyErr := doltserver.VerifyDatabases(townRoot)
+	// Use retry since Start() only waits 500ms — DBs may still be loading.
+	served, missing, verifyErr := doltserver.VerifyDatabasesWithRetry(townRoot, 5)
 	if verifyErr != nil {
 		fmt.Printf("  %s Could not verify databases: %v\n", style.Dim.Render("⚠"), verifyErr)
 	} else if len(missing) > 0 {
@@ -653,12 +654,26 @@ func runDoltMigrate(cmd *cobra.Command, args []string) error {
 		state, _ := doltserver.LoadState(townRoot)
 		fmt.Printf("%s Dolt server started (PID %d)\n", style.Bold.Render("✓"), state.PID)
 
+		// Set sync.mode=dolt-native in each rig's database BEFORE verification.
+		// ShouldExportJSONL reads sync.mode from the DB (not config.yaml) to decide
+		// whether to export JSONL. Without this, every bd write pays a 10-25s JSONL
+		// export penalty even though the rig is configured for dolt-native in yaml.
+		// This must run unconditionally — even if verification fails, we don't want
+		// to leave the user with the JSONL penalty on top of missing-DB issues.
+		setSyncModeErrs := setSyncModeForAllRigs(townRoot)
+		for _, err := range setSyncModeErrs {
+			fmt.Printf("  %s sync.mode set failed: %v\n", style.Dim.Render("⚠"), err)
+		}
+
 		// Verify the server is actually serving all databases that exist on disk.
 		// Dolt silently skips databases with stale manifests after migration,
 		// so filesystem discovery and SQL discovery can diverge.
-		served, missing, verifyErr := doltserver.VerifyDatabases(townRoot)
+		// Use retry since the server may still be loading databases after Start().
+		served, missing, verifyErr := doltserver.VerifyDatabasesWithRetry(townRoot, 5)
 		if verifyErr != nil {
 			fmt.Printf("  %s Could not verify databases: %v\n", style.Dim.Render("⚠"), verifyErr)
+			fmt.Printf("  Migration may be incomplete. Verify manually with: %s\n", style.Dim.Render("gt dolt status"))
+			return fmt.Errorf("database verification failed after migration: %w", verifyErr)
 		} else if len(missing) > 0 {
 			fmt.Printf("\n%s Some databases exist on disk but are NOT served by Dolt:\n", style.Bold.Render("⚠"))
 			for _, db := range missing {
@@ -670,17 +685,9 @@ func runDoltMigrate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    1. Stop the server:  %s\n", style.Dim.Render("gt dolt stop"))
 			fmt.Printf("    2. Repair the DB:    %s\n", style.Dim.Render("cd ~/gt/.dolt-data/<db> && dolt fsck --repair"))
 			fmt.Printf("    3. Restart:           %s\n", style.Dim.Render("gt dolt start"))
+			return fmt.Errorf("migration incomplete: %d database(s) exist on disk but are not served: %v", len(missing), missing)
 		} else {
 			fmt.Printf("  %s All %d databases verified as served\n", style.Bold.Render("✓"), len(served))
-		}
-
-		// Set sync.mode=dolt-native in each rig's database.
-		// ShouldExportJSONL reads sync.mode from the DB (not config.yaml) to decide
-		// whether to export JSONL. Without this, every bd write pays a 10-25s JSONL
-		// export penalty even though the rig is configured for dolt-native in yaml.
-		setSyncModeErrs := setSyncModeForAllRigs(townRoot)
-		for _, err := range setSyncModeErrs {
-			fmt.Printf("  %s sync.mode set failed: %v\n", style.Dim.Render("⚠"), err)
 		}
 	}
 

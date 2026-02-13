@@ -27,6 +27,7 @@
 package doltserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -576,52 +577,118 @@ func ListDatabases(townRoot string) ([]string, error) {
 // manifests after migration — the filesystem says they exist, but the server
 // doesn't serve them.
 func VerifyDatabases(townRoot string) (served, missing []string, err error) {
+	return verifyDatabasesWithRetry(townRoot, 1)
+}
+
+// VerifyDatabasesWithRetry is like VerifyDatabases but retries the SHOW DATABASES
+// query with exponential backoff to handle the case where the server has just started
+// and is still loading databases.
+func VerifyDatabasesWithRetry(townRoot string, maxAttempts int) (served, missing []string, err error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	return verifyDatabasesWithRetry(townRoot, maxAttempts)
+}
+
+func verifyDatabasesWithRetry(townRoot string, maxAttempts int) (served, missing []string, err error) {
 	config := DefaultConfig(townRoot)
 
-	// First, check if the server is reachable.
-	if err := CheckServerReachable(townRoot); err != nil {
-		return nil, nil, fmt.Errorf("server not reachable: %w", err)
+	// Retry with backoff since the server may still be loading databases
+	// after a recent start (Start() only waits 500ms + process-alive check).
+	// Both reachability and query are inside the loop so transient startup
+	// failures are retried.
+	const baseBackoff = 1 * time.Second
+	const maxBackoff = 8 * time.Second
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Check if the server is reachable (TCP-level).
+		if reachErr := CheckServerReachable(townRoot); reachErr != nil {
+			lastErr = fmt.Errorf("server not reachable: %w", reachErr)
+			if attempt < maxAttempts {
+				backoff := baseBackoff
+				for i := 1; i < attempt; i++ {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+						break
+					}
+				}
+				time.Sleep(backoff)
+			}
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, "dolt", "sql",
+			"-r", "json",
+			"-q", "SHOW DATABASES",
+		)
+		cmd.Dir = config.DataDir
+
+		// Capture stderr separately so it doesn't corrupt JSON parsing.
+		// Dolt commonly writes deprecation/manifest warnings to stderr.
+		// See also daemon/dolt.go:listDatabases() which uses cmd.Output()
+		// for the same reason.
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
+		output, queryErr := cmd.Output()
+		cancel()
+		if queryErr != nil {
+			stderrMsg := strings.TrimSpace(stderrBuf.String())
+			errDetail := strings.TrimSpace(string(output))
+			if stderrMsg != "" {
+				errDetail = errDetail + " (stderr: " + stderrMsg + ")"
+			}
+			lastErr = fmt.Errorf("querying SHOW DATABASES: %w (output: %s)", queryErr, errDetail)
+			if attempt < maxAttempts {
+				backoff := baseBackoff
+				for i := 1; i < attempt; i++ {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+						break
+					}
+				}
+				time.Sleep(backoff)
+			}
+			continue
+		}
+
+		var parseErr error
+		served, parseErr = parseShowDatabases(output)
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("parsing SHOW DATABASES output: %w", parseErr)
+		}
+
+		// Compare against filesystem databases.
+		fsDatabases, fsErr := ListDatabases(townRoot)
+		if fsErr != nil {
+			return served, nil, fmt.Errorf("listing filesystem databases: %w", fsErr)
+		}
+
+		missing = findMissingDatabases(served, fsDatabases)
+		return served, missing, nil
 	}
-
-	// Query the server for databases it is actually serving.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "dolt", "sql",
-		"-r", "json",
-		"-q", "SHOW DATABASES",
-	)
-	cmd.Dir = config.DataDir
-
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, nil, fmt.Errorf("querying SHOW DATABASES: %w", err)
-	}
-
-	served = parseShowDatabases(output)
-
-	// Compare against filesystem databases.
-	fsDatabases, err := ListDatabases(townRoot)
-	if err != nil {
-		return served, nil, fmt.Errorf("listing filesystem databases: %w", err)
-	}
-
-	missing = findMissingDatabases(served, fsDatabases)
-	return served, missing, nil
+	return nil, nil, lastErr
 }
 
 // parseShowDatabases parses the output of SHOW DATABASES from dolt sql.
-// It tries JSON parsing first, falling back to line-based parsing.
+// It tries JSON parsing first, falling back to line-based parsing for
+// plain-text output. Returns an error if the output format is unrecognized.
 // Filters out the information_schema database.
-func parseShowDatabases(output []byte) []string {
-	var result struct {
-		Rows []struct {
-			Database string `json:"Database"`
-		} `json:"rows"`
-	}
+func parseShowDatabases(output []byte) ([]string, error) {
+	// Try JSON first. Use a raw map to detect schema presence.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(output, &raw); err != nil {
+		// Check if the output looks like JSON that failed to parse —
+		// don't fall through to line parsing with JSON-shaped text.
+		trimmed := strings.TrimSpace(string(output))
+		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+			return nil, fmt.Errorf("output looks like JSON but failed to parse: %w", err)
+		}
 
-	var databases []string
-	if err := json.Unmarshal(output, &result); err != nil {
-		// Fall back to line parsing if JSON fails.
+		// Fall back to line parsing for plain-text output.
+		var databases []string
 		for _, line := range strings.Split(string(output), "\n") {
 			line = strings.TrimSpace(line)
 			if line != "" && line != "Database" && !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "|") {
@@ -630,29 +697,58 @@ func parseShowDatabases(output []byte) []string {
 				}
 			}
 		}
-	} else {
-		for _, row := range result.Rows {
-			if row.Database != "" && row.Database != "information_schema" {
-				databases = append(databases, row.Database)
-			}
+		if len(databases) == 0 && len(trimmed) > 0 {
+			return nil, fmt.Errorf("fallback parser returned zero databases from non-empty output (%d bytes); format may be unrecognized", len(trimmed))
+		}
+		return databases, nil
+	}
+
+	// JSON parsed — require the expected "rows" key.
+	rowsRaw, hasRows := raw["rows"]
+	if !hasRows {
+		return nil, fmt.Errorf("JSON output missing expected 'rows' key (keys: %v); Dolt output schema may have changed", jsonKeys(raw))
+	}
+
+	var rows []struct {
+		Database string `json:"Database"`
+	}
+	if err := json.Unmarshal(rowsRaw, &rows); err != nil {
+		return nil, fmt.Errorf("JSON 'rows' field has unexpected type: %w", err)
+	}
+
+	var databases []string
+	for _, row := range rows {
+		if row.Database != "" && row.Database != "information_schema" {
+			databases = append(databases, row.Database)
 		}
 	}
-	return databases
+	return databases, nil
 }
 
 // findMissingDatabases returns filesystem databases not present in the served list.
+// Comparison is case-insensitive since Dolt database names are case-insensitive
+// in SQL but case-preserving on the filesystem.
 func findMissingDatabases(served, fsDatabases []string) []string {
 	servedSet := make(map[string]bool, len(served))
 	for _, db := range served {
-		servedSet[db] = true
+		servedSet[strings.ToLower(db)] = true
 	}
 	var missing []string
 	for _, db := range fsDatabases {
-		if !servedSet[db] {
+		if !servedSet[strings.ToLower(db)] {
 			missing = append(missing, db)
 		}
 	}
 	return missing
+}
+
+// jsonKeys returns the top-level keys from a JSON object map, for diagnostics.
+func jsonKeys(m map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // InitRig initializes a new rig database in the data directory.
