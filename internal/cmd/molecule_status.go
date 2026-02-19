@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -757,8 +759,9 @@ func outputMoleculeStatus(status MoleculeStatusInfo) error {
 		}
 	}
 
-	// Git divergence warning (gt-7w6cq)
+	// Git divergence warning and recent trail (gt-7w6cq)
 	showGitDivergenceWarning()
+	showRecentTrailSummary()
 
 	// Next action hint
 	if status.NextAction != "" {
@@ -768,21 +771,38 @@ func outputMoleculeStatus(status MoleculeStatusInfo) error {
 	return nil
 }
 
-// showGitDivergenceWarning checks if the current branch has diverged from its
-// remote tracking branch and shows a warning. Uses local refs only (no fetch)
-// so it's fast but may be stale.
+// showGitDivergenceWarning fetches from origin and checks if the current branch
+// has diverged from its remote tracking branch, showing a warning if so.
 func showGitDivergenceWarning() {
 	g := git.NewGit(".")
+	if !g.IsRepo() {
+		return
+	}
+
 	branch, err := g.CurrentBranch()
 	if err != nil || branch == "" {
 		return
 	}
 
+	// Fetch quietly to get fresh remote refs. Non-fatal if it fails
+	// (e.g., offline, no remote).
+	_ = g.Fetch("origin")
+
 	remote := "origin/" + branch
 	ahead, aErr := g.CommitsAhead(remote, "HEAD")
 	behind, bErr := g.CountCommitsBehind(remote)
+
+	// Also check divergence from origin/main as a fallback — polecats
+	// work on feature branches that may not have a remote tracking branch,
+	// but we still want to warn if they're behind main.
 	if aErr != nil || bErr != nil {
-		return // No tracking branch or other error — skip silently
+		// No tracking branch for current branch; check against origin/main
+		ahead, aErr = g.CommitsAhead("origin/main", "HEAD")
+		behind, bErr = g.CountCommitsBehind("origin/main")
+		if aErr != nil || bErr != nil {
+			return // Can't determine divergence at all — skip silently
+		}
+		remote = "origin/main"
 	}
 
 	if ahead == 0 && behind == 0 {
@@ -802,6 +822,78 @@ func showGitDivergenceWarning() {
 		fmt.Printf("%s Branch is %d commits ahead of %s (unpushed work)\n",
 			style.Dim.Render("ℹ"), ahead, remote)
 	}
+}
+
+// showRecentTrailSummary shows a compact summary of recent agent activity.
+// Leverages git log and beads to show what happened since last activity.
+func showRecentTrailSummary() {
+	g := git.NewGit(".")
+	if !g.IsRepo() {
+		return
+	}
+
+	// Get recent commits (last 24h) — summarize by author
+	since := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+	gitArgs := []string{
+		"log",
+		"--format=%an",
+		"--since=" + since,
+		"-n50",
+		"--all",
+	}
+	gitCmd := exec.Command("git", gitArgs...)
+	output, err := gitCmd.Output()
+	if err != nil {
+		return
+	}
+
+	// Count commits per author
+	authorCounts := make(map[string]int)
+	totalCommits := 0
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		authorCounts[line]++
+		totalCommits++
+	}
+
+	if totalCommits == 0 {
+		return
+	}
+
+	// Build compact author summary (e.g., "3 commits by darcy, 2 by nux")
+	type authorCount struct {
+		name  string
+		count int
+	}
+	var authors []authorCount
+	for name, count := range authorCounts {
+		authors = append(authors, authorCount{name, count})
+	}
+	// Sort by count descending
+	for i := 0; i < len(authors); i++ {
+		for j := i + 1; j < len(authors); j++ {
+			if authors[j].count > authors[i].count {
+				authors[i], authors[j] = authors[j], authors[i]
+			}
+		}
+	}
+
+	var parts []string
+	for i, a := range authors {
+		if i >= 3 {
+			remaining := len(authors) - 3
+			parts = append(parts, fmt.Sprintf("+%d others", remaining))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%d by %s", a.count, a.name))
+	}
+
+	fmt.Printf("\n%s Recent (24h): %d commits (%s)\n",
+		style.Dim.Render("📍"), totalCommits, strings.Join(parts, ", "))
 }
 
 func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
